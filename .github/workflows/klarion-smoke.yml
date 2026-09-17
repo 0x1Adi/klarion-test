@@ -1,0 +1,35 @@
+name: klarion-smoke
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Klarion
+        id: klarion
+        continue-on-error: true
+        uses: 0x1Adi/Klarion@v0.3.1
+        with:
+          ai-mode: "off"
+          upload-sarif: "false"
+
+      - name: Check results
+        env:
+          OUTCOME: ${{ steps.klarion.outcome }}
+        run: |
+          test -s klarion.sarif || { echo "::error::no klarion.sarif, the action did not run"; exit 1; }
+          count() { jq "[.runs[].results[].locations[]?.physicalLocation.artifactLocation.uri // \"\" | select(endswith(\"$1\"))] | length" klarion.sarif; }
+          planted=$(count config.py); clean=$(count clean.py)
+          echo "step=$OUTCOME planted=$planted clean=$clean"
+          [ "$planted" -ge 1 ] || { echo "::error::missed the planted password in config.py"; exit 1; }
+          [ "$clean" -eq 0 ] || { echo "::error::flagged clean.py, which has no secret"; exit 1; }
+          [ "$OUTCOME" = "failure" ] || { echo "::error::the Klarion step passed with a secret present"; exit 1; }
+          echo "Smoke test passed"
