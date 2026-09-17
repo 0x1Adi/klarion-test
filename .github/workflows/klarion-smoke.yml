@@ -6,30 +6,44 @@ on:
 
 permissions:
   contents: read
+  security-events: write
 
 jobs:
   scan:
     runs-on: ubuntu-latest
+    env:
+      GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
     steps:
       - uses: actions/checkout@v6
+
+      - run: echo "STARTED=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
 
       - name: Klarion
         id: klarion
         continue-on-error: true
         uses: 0x1Adi/Klarion@v0.3.1
-        with:
-          ai-mode: "off"
-          upload-sarif: "false"
 
       - name: Check results
         env:
           OUTCOME: ${{ steps.klarion.outcome }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          test -s klarion.sarif || { echo "::error::no klarion.sarif, the action did not run"; exit 1; }
-          count() { jq "[.runs[].results[].locations[]?.physicalLocation.artifactLocation.uri // \"\" | select(endswith(\"$1\"))] | length" klarion.sarif; }
-          planted=$(count config.py); clean=$(count clean.py)
-          echo "step=$OUTCOME planted=$planted clean=$clean"
-          [ "$planted" -ge 1 ] || { echo "::error::missed the planted password in config.py"; exit 1; }
-          [ "$clean" -eq 0 ] || { echo "::error::flagged clean.py, which has no secret"; exit 1; }
-          [ "$OUTCOME" = "failure" ] || { echo "::error::the Klarion step passed with a secret present"; exit 1; }
+          fail() { echo "::error::$1"; exit 1; }
+          test -s klarion.sarif || fail "no SARIF report, see the Klarion step log"
+          jq -r '.runs[].results[].message.text' klarion.sarif
+          count() { jq "[.runs[].results[] | select((.locations[0].physicalLocation.artifactLocation.uri // \"\") | endswith(\"$1\")) | select(.message.text | contains(\"$2\"))] | length" klarion.sarif; }
+          planted=$(count config.py ""); confirmed=$(count config.py "(secret)"); clean=$(count clean.py "")
+          uploaded=""
+          for i in 1 2 3 4 5 6; do
+            uploaded=$(gh api "repos/$GITHUB_REPOSITORY/code-scanning/analyses?per_page=1" --jq ".[0] | select(.created_at >= \"$STARTED\") | .results_count") || uploaded=""
+            [ -n "$uploaded" ] && break
+            sleep 5
+          done
+          echo "step=$OUTCOME planted=$planted confirmed=$confirmed clean=$clean uploaded_results=${uploaded:-none}"
+          [ "$planted" -ge 1 ] || fail "missed the planted password in config.py"
+          [ "$confirmed" -ge 1 ] || fail "the AI check did not confirm the planted password"
+          [ "$clean" -eq 0 ] || fail "flagged clean.py, which has no secret"
+          [ "$OUTCOME" = "failure" ] || fail "the Klarion step passed with a secret present"
+          test -s .klarion/verdicts.json || fail "no verdict cache was written"
+          [ "${uploaded:-0}" -ge 1 ] || fail "no upload with results reached the Security tab in this run"
           echo "Smoke test passed"
